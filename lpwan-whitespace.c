@@ -30,8 +30,9 @@
 
 /* BIOS header files */
 #include <ti/sysbios/BIOS.h>
-#include <ti/sysbios/knl/Task.h>
 #include <ti/sysbios/knl/Clock.h>
+#include <ti/sysbios/knl/Event.h>
+#include <ti/sysbios/knl/Task.h>
 
 /* TI-RTOS header files */
 #include <ti/drivers/PIN.h>
@@ -43,6 +44,10 @@
 
 /* LoRaMac-node header files */
 #include "LoRaMac-node/src/boards/LoRaBug/board.h"
+
+/* Communication mode */
+#define MODE_TRANSMIT
+/* #define MODE_RECEIVE */
 
 /*
     Frequencies (Hz)
@@ -75,6 +80,9 @@
 /* Transmit power (dBm) */
 #define TX_POWER 20
 
+/* Timeout time (0 for no timeout) */
+#define RX_TIMEOUT 0
+
 /* LoRa bandwidth [0: 125kHz, 1: 250kHz, 2: 500kHz, 3: reserved] */
 #define LORA_BANDWIDTH 0
 
@@ -97,23 +105,18 @@
 #define LORA_IQ_INVERSION false
 
 /* Payload size (bytes) */
-#define BUFFER_SIZE 64
+#define PAYLOAD_SIZE 64
 
 /* Reference time of one millisecond */
 #define TIME_MS (1000/Clock_tickPeriod)
 
-/* */
-uint16_t BufferSize = BUFFER_SIZE;
-uint8_t Buffer[BUFFER_SIZE];
-
-/* Value for received signal strength indicator (RSSI) */
-int8_t rssiValue = 0;
-
-/* Value for signal-to-noise ratio (SNR) */
-int8_t snrValue = 0;
+/* Payload buffer */
+uint16_t payloadBufferSize = PAYLOAD_SIZE;
+uint8_t payloadBuffer[PAYLOAD_SIZE];
 
 /* Buffer for snprintf() */
-static char sbuf[128];
+#define SBUF_SIZE 128
+static char sbuf[SBUF_SIZE];
 
 /* Radio events */
 #define EVENT_TRANSMIT                      Event_Id_00
@@ -124,9 +127,8 @@ static char sbuf[128];
 #define EVENT_CHANNEL_ACTIVITY_DETECT_TRUE  Event_Id_05
 #define EVENT_CHANNEL_ACTIVITY_DETECT_FALSE Event_Id_06
 
-/* Radio events function pointer */
+/* Radio events data structures */
 static RadioEvents_t RadioEvents;
-
 static Event_Struct radioEventsStruct;
 static Event_Handle radioEvents;
 
@@ -149,29 +151,150 @@ void onReceiveError(void);
 void onChannelActivityDetection(bool channelActivityDetected);
 
 void onTransmit(void) {
-    
+    Radio.Sleep();
+    Event_post(radioEvents, EVENT_TRANSMIT);
 }
 
 void onReceive(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr) {
+    /* Print data */
+    printf("# Received packet. Size=%u, RSSI=%d, SNR=%d.\n", size, rssi, snr);
+    snprintf(sbuf, sizeof(sbuf), "# Received packet. Size=%u, RSSI=%d, SNR=%d.\r\n", size, rssi, snr);
+    uartwrite(sbuf, strlen(sbuf));
 
+    /* Print payload */
+    payloadBufferSize = size;
+    memcpy(payloadBuffer, payload, payloadBufferSize);
+    uarthexdump(payload, size);
+    uartputs("\r");
 }
 
 void onTransmitTimeout(void) {
+    printf("# Transmit timeout.\n");
+    uartputs("# Transmit timeout.");
+    uartputs("\r");
 
+    Radio.Sleep();
+    Event_post(radioEvents, EVENT_TRANSMIT_TIMEOUT);
 }
 
 void onReceiveTimeout(void) {
+    printf("# Receive timeout.\n");
+    uartputs("# Receive timeout.");
+    uartputs("\r");
 
+    Radio.Sleep();
+    Event_post(radioEvents, EVENT_RECEIVE_TIMEOUT);
 }
 
 void onReceiveError(void) {
+    printf("# Receive error.\n");
+    uartputs("# Receive error.");
+    uartputs("\r");
 
+    Event_post(radioEvents, EVENT_RECEIVE_ERROR);
 }
 
 void onChannelActivityDetection(bool channelActivityDetected) {
+    Radio.Sleep();
 
+    printf("# Channel activity %s.\n", channelActivityDetected ? "detected" : "not detected");
+    snprintf(sbuf, sizeof(sbuf), "# Channel activity %s.\n", channelActivityDetected ? "detected" : "not detected");
+    uartwrite(sbuf, strlen(sbuf));
+
+    Event_post(radioEvents, channelActivityDetected ? EVENT_CHANNEL_ACTIVITY_DETECT_TRUE : EVENT_CHANNEL_ACTIVITY_DETECT_FALSE);
+}
+
+#define TASKSTACKSIZE   2048
+
+Task_Struct task0Struct;
+Char task0Stack[TASKSTACKSIZE];
+
+/*
+    The main task of the experiment:
+    Either continuously transmit or receive packets.
+    If receiving packets, record payload, size, RSSI, and SNR.
+*/
+void maintask(UArg arg0, UArg arg1) {
+    unsigned int packetCount = 0;
+
+    /* Initialize target board */
+    BoardInitMcu();
+    BoardInitPeriph();
+
+    /* Initialize radio events struct */
+    Event_construct(&radioEventsStruct, NULL);
+    radioEvents = Event_handle(&radioEventsStruct);
+
+    /* Initialize radio events */
+    RadioEvents.TxDone    = onTransmit;
+    RadioEvents.RxDone    = onReceive;
+    RadioEvents.TxTimeout = onTransmitTimeout;
+    RadioEvents.RxTimeout = onReceiveTimeout;
+    RadioEvents.RxError   = onReceiveError;
+    RadioEvents.CadDone   = onChannelActivityDetection;
+
+    /* Initialize radio */
+    Radio.Init(&RadioEvents);
+    Radio.SetChannel(FREQUENCY);
+
+    Radio.SetTxConfig(MODEM_LORA, TX_POWER, 0, LORA_BANDWIDTH, LORA_DATARATE,
+                      LORA_CODINGRATE, LORA_PREAMBLE_LENGTH,
+                      LORA_FIXED_LENGTH_PAYLOAD, true, 0, 0, LORA_IQ_INVERSION,
+                      3000);
+
+    Radio.SetRxConfig(MODEM_LORA, LORA_BANDWIDTH, LORA_DATARATE,
+                      LORA_CODINGRATE, 0, LORA_PREAMBLE_LENGTH,
+                      LORA_SYMBOL_TIMEOUT, LORA_FIXED_LENGTH_PAYLOAD, 0, true,
+                      0, 0, LORA_IQ_INVERSION, true);
+
+    Radio.Rx(RX_TIMEOUT);
+
+    while (1) {
+#if defined(MODE_TRANSMIT)
+        /* Construct payload */
+        char payloadToTransmit[PAYLOAD_SIZE];
+        snprintf(payloadToTransmit, sizeof(payloadToTransmit), "Packet %u", packetCount++);
+        printf("# Transmitting packet: \"%s\"\n", payloadToTransmit);
+        uartprintf("# Transmitting packet: \"%s\"\r\n", payloadToTransmit);
+
+        /* Transmit payload */
+        Radio.Send(payloadToTransmit, strlen(payloadToTransmit));
+
+        /* Process events */
+        Event_pend(radioEvents, Event_Id_NONE, EVENT_TRANSMIT | EVENT_TRANSMIT_TIMEOUT, BIOS_WAIT_FOREVER);
+        Task_sleep(TIME_MS * 20);
+
+#elif defined(MODE_RECEIVE)
+        Task_yield();
+
+#else
+#error "Error: Define MODE_TRANSMIT or MODE_RECEIVE."
+#endif
+    }
 }
 
 int main(void) {
+    /* Initialize target board */
+    Board_initGeneral();
+    Board_initSPI();
+    Board_initUART();
 
+    /* Construct tast thread */
+    Task_Params taskParams;
+    Task_Params_init(&taskParams);
+    taskParams.arg0 = 1000 * TIME_MS;
+    taskParams.stackSize = TASKSTACKSIZE;
+    taskParams.stack = &task0Stack;
+    Task_construct(&task0Struct, (Task_FuncPtr)maintask, &taskParams, NULL);
+
+    /* Open and set up pins */
+    setuppins();
+
+    /* Open UART */
+    setupuart();
+
+    /* Start BIOS */
+    BIOS_start();
+
+    return 0;
 }
