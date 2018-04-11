@@ -77,8 +77,11 @@
 /* Transmit/receive frequency (Hz) */
 #define FREQUENCY FREQUENCY_LORA_HF
 
+/* Uncomment for debug printing */
+/* #define DEBUG_PRINTING */
+
 /* Transmit power (dBm) */
-#define TX_POWER 20
+#define TX_POWER 14
 
 /* Timeout time (0 for no timeout) */
 #define RX_TIMEOUT 0
@@ -156,51 +159,65 @@ void onTransmit(void) {
 }
 
 void onReceive(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr) {
+    /* Save payload */
+    payloadBufferSize = size;
+    memcpy(payloadBuffer, payload, payloadBufferSize);
+#if defined(DEBUG_PRINTING)
     /* Print data */
     printf("# Received packet. Size=%u, RSSI=%d, SNR=%d.\n", size, rssi, snr);
     snprintf(sbuf, sizeof(sbuf), "# Received packet. Size=%u, RSSI=%d, SNR=%d.\r\n", size, rssi, snr);
     uartwrite(sbuf, strlen(sbuf));
 
     /* Print payload */
-    payloadBufferSize = size;
-    memcpy(payloadBuffer, payload, payloadBufferSize);
     uarthexdump(payload, size);
     uartputs("\r");
+#else
+    /* Print RSSI and SNR, comma-separated */
+    snprintf(sbuf, sizeof(sbuf), "%d,%d,\r\n", rssi, snr);
+    uartwrite(sbuf, strlen(sbuf));
+#endif
 }
 
 void onTransmitTimeout(void) {
+#if defined(DEBUG_PRINTING)
     printf("# Transmit timeout.\n");
     uartputs("# Transmit timeout.");
     uartputs("\r");
+#endif
 
     Radio.Sleep();
     Event_post(radioEvents, EVENT_TRANSMIT_TIMEOUT);
 }
 
 void onReceiveTimeout(void) {
+#if defined(DEBUG_PRINTING)
     printf("# Receive timeout.\n");
     uartputs("# Receive timeout.");
     uartputs("\r");
+#endif
 
     Radio.Sleep();
     Event_post(radioEvents, EVENT_RECEIVE_TIMEOUT);
 }
 
 void onReceiveError(void) {
+#if defined(DEBUG_PRINTING)
     printf("# Receive error.\n");
     uartputs("# Receive error.");
     uartputs("\r");
+#endif
 
     Event_post(radioEvents, EVENT_RECEIVE_ERROR);
 }
 
 void onChannelActivityDetection(bool channelActivityDetected) {
-    Radio.Sleep();
-
+#if defined(DEBUG_PRINTING)
     printf("# Channel activity %s.\n", channelActivityDetected ? "detected" : "not detected");
     snprintf(sbuf, sizeof(sbuf), "# Channel activity %s.\n", channelActivityDetected ? "detected" : "not detected");
     uartwrite(sbuf, strlen(sbuf));
+#endif
 
+    Radio.Sleep();
     Event_post(radioEvents, channelActivityDetected ? EVENT_CHANNEL_ACTIVITY_DETECT_TRUE : EVENT_CHANNEL_ACTIVITY_DETECT_FALSE);
 }
 
@@ -254,8 +271,10 @@ void maintask(UArg arg0, UArg arg1) {
         /* Construct payload */
         char payloadToTransmit[PAYLOAD_SIZE];
         snprintf(payloadToTransmit, sizeof(payloadToTransmit), "Packet %u", packetCount++);
+#if defined(DEBUG_PRINTING)
         printf("# Transmitting packet: \"%s\"\n", payloadToTransmit);
         uartprintf("# Transmitting packet: \"%s\"\r\n", payloadToTransmit);
+#endif
 
         /* Transmit payload */
         Radio.Send(payloadToTransmit, strlen(payloadToTransmit));
