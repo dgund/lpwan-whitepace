@@ -80,6 +80,9 @@
 /* Uncomment for debug printing */
 /* #define DEBUG_PRINTING */
 
+/* Packet count (0 for unlimited transmission) */
+#define TX_PACKET_COUNT 0
+
 /* Transmit power (dBm) */
 #define TX_POWER 14
 
@@ -270,7 +273,7 @@ void maintask(UArg arg0, UArg arg1) {
 #if defined(MODE_TRANSMIT)
         /* Construct payload */
         char payloadToTransmit[PAYLOAD_SIZE];
-        snprintf(payloadToTransmit, sizeof(payloadToTransmit), "Packet %u", packetCount++);
+        snprintf(payloadToTransmit, sizeof(payloadToTransmit), "Packet %u", packetCount);
 #if defined(DEBUG_PRINTING)
         printf("# Transmitting packet: \"%s\"\n", payloadToTransmit);
         uartprintf("# Transmitting packet: \"%s\"\r\n", payloadToTransmit);
@@ -281,6 +284,14 @@ void maintask(UArg arg0, UArg arg1) {
 
         /* Process events */
         Event_pend(radioEvents, Event_Id_NONE, EVENT_TRANSMIT | EVENT_TRANSMIT_TIMEOUT, BIOS_WAIT_FOREVER);
+
+        /* Stop transmititng after TX_PACKET_COUNT packets */
+        packetCount++;
+        if (TX_PACKET_COUNT > 0 && packetCount >= TX_PACKET_COUNT) {
+            break;
+        }
+
+        /* Sleep */
         Task_sleep(TIME_MS * 20);
 
 #elif defined(MODE_RECEIVE)
